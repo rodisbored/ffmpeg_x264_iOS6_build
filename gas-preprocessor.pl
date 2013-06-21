@@ -92,16 +92,20 @@ my $macro_level = 0;
 my %macro_lines;
 my %macro_args;
 my %macro_args_default;
+my $macro_count = 0;
+my $altmacro = 0;
 
 my @pass1_lines;
 my @ifstack;
+
+my %symbols;
 
 # pass 1: parse .macro
 # note that the handling of arguments is probably overly permissive vs. gas
 # but it should be the same for valid cases
 while (<ASMFILE>) {
     # remove all comments (to avoid interfering with evaluating directives)
-    s/$comm.*//x;
+    s/(?<!\\)$comm.*//x;
 
     # comment out unsupported directives
     s/\.type/$comm.type/x;
@@ -128,6 +132,12 @@ while (<ASMFILE>) {
     parse_line($_);
 }
 
+sub eval_expr {
+    my $expr = $_[0];
+    $expr =~ s/([A-Za-z._][A-Za-z0-9._]*)/$symbols{$1}/g;
+    eval $expr;
+}
+
 sub handle_if {
     my $line = $_[0];
     # handle .if directives; apple's assembler doesn't support important non-basic ones
@@ -147,11 +157,11 @@ sub handle_if {
                 die "argument to .ifc not recognized";
             }
         } elsif ($type eq "") {
-            $result ^= eval($expr) != 0;
+            $result ^= eval_expr($expr) != 0;
         } elsif ($type eq "eq") {
-            $result = eval($expr) == 0;
+            $result = eval_expr($expr) == 0;
         } elsif ($type eq "lt") {
-            $result = eval($expr) < 0;
+            $result = eval_expr($expr) < 0;
         } else {
 	    chomp($line);
             die "unhandled .if varient. \"$line\"";
@@ -173,7 +183,7 @@ sub parse_line {
             return;
         } elsif ($line =~ /\.elseif\s+(.*)/) {
             if ($ifstack[-1] == 0) {
-                $ifstack[-1] = !!eval($1);
+                $ifstack[-1] = !!eval_expr($1);
             } elsif ($ifstack[-1] > 0) {
                 $ifstack[-1] = -$ifstack[-1];
             }
@@ -213,7 +223,7 @@ sub parse_line {
     } elsif ($macro_level == 0) {
         expand_macros($line);
     } else {
-        if (/\.macro\s+([\d\w\.]+)\s*(.*)/) {
+        if ($line =~ /\.macro\s+([\d\w\.]+)\s*(.*)/) {
             $current_macro = $1;
 
             # commas in the argument list are optional, so only use whitespace as the separator
@@ -254,6 +264,22 @@ sub expand_macros {
         return;
     }
 
+    if ($line =~ /\.altmacro/) {
+        $altmacro = 1;
+        return;
+    }
+
+    if ($line =~ /\.noaltmacro/) {
+        $altmacro = 0;
+        return;
+    }
+
+    $line =~ s/\%([^,]*)/eval_expr($1)/eg if $altmacro;
+
+    if ($line =~ /\.set\s+(.*),\s*(.*)/) {
+        $symbols{$1} = eval_expr($2);
+    }
+
     if ($line =~ /(\S+:|)\s*([\w\d\.]+)\s*(.*)/ && exists $macro_lines{$2}) {
         push(@pass1_lines, $1);
         my $macro = $2;
@@ -266,9 +292,8 @@ sub expand_macros {
 
         my $comma_sep_required = 0;
         foreach (@arglist) {
-            # allow for + and - in macro arguments
-            $_ =~ s/\s*\+\s*/+/;
-            $_ =~ s/\s*\-\s*/-/;
+            # allow arithmetic/shift operators in macro arguments
+            $_ =~ s/\s*(\+|-|\*|\/|<<|>>)\s*/$1/g;
 
             my @whitespace_split = split(/\s+/, $_);
             if (!@whitespace_split) {
@@ -322,6 +347,8 @@ sub expand_macros {
             }
         }
 
+        my $count = $macro_count++;
+
         # apply replacements as regex
         foreach (@{$macro_lines{$macro}}) {
             my $macro_line = $_;
@@ -330,6 +357,7 @@ sub expand_macros {
             foreach (reverse sort {length $a <=> length $b} keys %replacements) {
                 $macro_line =~ s/\\$_/$replacements{$_}/g;
             }
+            $macro_line =~ s/\\\@/$count/g;
             $macro_line =~ s/\\\(\)//g;     # remove \()
             parse_line($macro_line);
         }
@@ -339,8 +367,11 @@ sub expand_macros {
 }
 
 close(ASMFILE) or exit 1;
-open(ASMFILE, "|-", @gcc_cmd) or die "Error running assembler";
-#open(ASMFILE, ">/tmp/a.S") or die "Error running assembler";
+if ($ENV{GASPP_DEBUG}) {
+    open(ASMFILE, ">&STDOUT");
+} else {
+    open(ASMFILE, "|-", @gcc_cmd) or die "Error running assembler";
+}
 
 my @sections;
 my $num_repts;
@@ -348,6 +379,11 @@ my $rept_lines;
 
 my %literal_labels;     # for ldr <reg>, =<expr>
 my $literal_num = 0;
+
+my $thumb = 0;
+
+my %thumb_labels;
+my %call_targets;
 
 my $in_irp = 0;
 my @irp_args;
@@ -368,20 +404,44 @@ foreach my $line (@pass1_lines) {
         push(@sections, $line);
     }
 
+    $thumb = 1 if $line =~ /\.code\s+16|\.thumb/;
+    $thumb = 0 if $line =~ /\.code\s+32|\.arm/;
+
     # handle ldr <reg>, =<expr>
     if ($line =~ /(.*)\s*ldr([\w\s\d]+)\s*,\s*=(.*)/) {
         my $label = $literal_labels{$3};
         if (!$label) {
-            $label = ".Literal_$literal_num";
+            $label = "Literal_$literal_num";
             $literal_num++;
             $literal_labels{$3} = $label;
         }
         $line = "$1 ldr$2, $label\n";
     } elsif ($line =~ /\.ltorg/) {
+        $line .= ".align 2\n";
         foreach my $literal (keys %literal_labels) {
             $line .= "$literal_labels{$literal}:\n .word $literal\n";
         }
         %literal_labels = ();
+    }
+
+    # thumb add with large immediate needs explicit add.w
+    if ($thumb and $line =~ /add\s+.*#([^@]+)/) {
+        $line =~ s/add/add.w/ if eval_expr($1) > 255;
+    }
+
+    # mach-o local symbol names start with L (no dot)
+    $line =~ s/(?<!\w)\.(L\w+)/$1/g;
+
+    if ($thumb and $line =~ /^\s*(\w+)\s*:/) {
+        $thumb_labels{$1}++;
+    }
+
+    if ($line =~ /^\s*((\w+\s*:\s*)?bl?x?(?:..)?(?:\.w)?|\.globl)\s+(\w+)/) {
+        if (exists $thumb_labels{$3}) {
+            print ASMFILE ".thumb_func $3\n";
+        } else {
+            $call_targets{$3}++;
+        }
     }
 
     # @l -> lo16()  @ha -> ha16()
@@ -461,9 +521,15 @@ foreach my $line (@pass1_lines) {
 }
 
 print ASMFILE ".text\n";
+print ASMFILE ".align 2\n";
 foreach my $literal (keys %literal_labels) {
-    print ASMFILE "$literal_labels{$literal}:\n .word $literal\n";
+    my $label = $literal_labels{$literal};
+    print ASMFILE ".set Lval_$label, $literal\n";
+    print ASMFILE "$label: .word Lval_$label\n";
 }
+
+map print(ASMFILE ".thumb_func $_\n"),
+    grep exists $thumb_labels{$_}, keys %call_targets;
 
 close(ASMFILE) or exit 1;
 #exit 1
