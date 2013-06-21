@@ -1,0 +1,14 @@
+README:
+
+Scripts to build x264 enabled ffmpeg for iOS 6.1 (Xcode 4.6.3 default directory structure)
+Builds only version for armv7.  armv6 support has been disabled in iOS 6.0+ SDK
+
+gas-preprocessor.pl
+Copy into your /usr/local/bin directory (or /usr/bin if the former is not in your path).  The latest can be found at https://github.com/yuvi/gas-preprocessor, but this version works fine.
+
+build_x264 (use first)
+Uses Git to retrieve the latest versions of the x264 source code and initiate a build on them. Make sure you can use git.
+
+build_ffmpeg_x264.sh (second)
+Uses Git to retrieve the latest version of ffmpeg and do a build on it including the x264 library.  It also turns on the h264 encoders/decoders. Builds versions for armv7 in ./build.armv7.  The header files are in ./installed/include
+

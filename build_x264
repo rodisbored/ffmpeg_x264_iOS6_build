@@ -1,0 +1,29 @@
+#!/bin/sh
+
+# This script is originally based off of the one by Gabriel Handford
+# Original scripts can be found here: https://github.com/gabriel/ffmpeg-iphone-build
+# Modified by Roderick Buenviaje
+# Builds versions of the VideoLAN x264 for iOS armv7
+# Building for armv6 has been disabled in SDK
+
+trap exit ERR
+
+export DIR=./x264
+export DEST=armv7
+#specify the version of iOS you want to build against
+export VERSION="6.1"
+
+mkdir -p ./x264
+
+git clone git://git.videolan.org/x264.git x264
+
+cd $DIR
+
+echo "Building armv7..."
+
+CC=/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/usr/bin/llvm-gcc ./configure --host=arm-apple-darwin --sysroot=/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS${VERSION}.sdk --prefix=$DEST --extra-cflags='-arch armv7' --extra-ldflags="-L/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS${VERSION}.sdk/usr/lib/system -arch armv7" --enable-pic --enable-static
+
+make && make install
+
+echo "Installed: $DEST"
+
